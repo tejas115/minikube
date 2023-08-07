@@ -238,7 +238,7 @@ func (k *Bootstrapper) init(cfg config.ClusterConfig) error {
 		return errors.Wrap(err, "clearing stale configs")
 	}
 
-	conf := bsutil.KubeadmYamlPath
+	conf := constants.KubeadmYamlPath
 	ctx, cancel := context.WithTimeout(context.Background(), initTimeoutMinutes*time.Minute)
 	defer cancel()
 	kr, kw := io.Pipe()
@@ -429,7 +429,7 @@ func (k *Bootstrapper) StartCluster(cfg config.ClusterConfig) error {
 		// Fall-through to init
 	}
 
-	conf := bsutil.KubeadmYamlPath
+	conf := constants.KubeadmYamlPath
 	if _, err := k.c.RunCmd(exec.Command("sudo", "cp", conf+".new", conf)); err != nil {
 		return errors.Wrap(err, "cp")
 	}
@@ -587,7 +587,7 @@ func (k *Bootstrapper) WaitForNode(cfg config.ClusterConfig, n config.Node, time
 	return nil
 }
 
-// ensureKubeletStarted will start a systemd or init.d service if it is not running.
+// ensureServiceStarted will start a systemd or init.d service if it is not running.
 func (k *Bootstrapper) ensureServiceStarted(svc string) error {
 	if st := kverify.ServiceStatus(k.c, svc); st != state.Running {
 		klog.Warningf("surprisingly %q service status was %s!. will try to start it, could be related to this issue https://github.com/kubernetes/minikube/issues/9458", svc, st)
@@ -678,7 +678,7 @@ func (k *Bootstrapper) restartControlPlane(cfg config.ClusterConfig) error {
 	}
 
 	// If the cluster is running, check if we have any work to do.
-	conf := bsutil.KubeadmYamlPath
+	conf := constants.KubeadmYamlPath
 
 	if !k.needsReconfigure(conf, hostname, port, client, cfg.KubernetesConfig.KubernetesVersion) {
 		klog.Infof("Taking a shortcut, as the cluster seems to be properly configured")
@@ -929,7 +929,12 @@ func (k *Bootstrapper) UpdateCluster(cfg config.ClusterConfig) error {
 	}
 
 	if err := r.Preload(cfg); err != nil {
-		klog.Infof("preload failed, will try to load cached images: %v", err)
+		switch err.(type) {
+		case *cruntime.ErrISOFeature:
+			out.ErrT(style.Tip, "Existing disk is missing new features ({{.error}}). To upgrade, run 'minikube delete'", out.V{"error": err})
+		default:
+			klog.Infof("preload failed, will try to load cached images: %v", err)
+		}
 	}
 
 	if cfg.KubernetesConfig.ShouldLoadCachedImages {
@@ -982,7 +987,7 @@ func (k *Bootstrapper) UpdateNode(cfg config.ClusterConfig, n config.Node, r cru
 	}
 
 	if n.ControlPlane {
-		files = append(files, assets.NewMemoryAssetTarget(kubeadmCfg, bsutil.KubeadmYamlPath+".new", "0640"))
+		files = append(files, assets.NewMemoryAssetTarget(kubeadmCfg, constants.KubeadmYamlPath+".new", "0640"))
 	}
 
 	// Installs compatibility shims for non-systemd environments

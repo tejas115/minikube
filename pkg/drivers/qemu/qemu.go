@@ -42,7 +42,13 @@ import (
 	"github.com/docker/machine/libmachine/state"
 	"github.com/pkg/errors"
 
+	"k8s.io/klog/v2"
 	pkgdrivers "k8s.io/minikube/pkg/drivers"
+	"k8s.io/minikube/pkg/minikube/exit"
+	"k8s.io/minikube/pkg/minikube/firewall"
+	"k8s.io/minikube/pkg/minikube/out"
+	"k8s.io/minikube/pkg/minikube/reason"
+	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/network"
 )
 
@@ -85,6 +91,7 @@ type Driver struct {
 	MACAddress            string
 	SocketVMNetPath       string
 	SocketVMNetClientPath string
+	ExtraDisks            int
 }
 
 func (d *Driver) GetMachineName() string {
@@ -273,6 +280,16 @@ func (d *Driver) Create() error {
 		}
 	}
 
+	if d.ExtraDisks > 0 {
+		log.Info("Creating extra disk images...")
+		for i := 0; i < d.ExtraDisks; i++ {
+			path := pkgdrivers.ExtraDiskPath(d.BaseDriver, i)
+			if err := pkgdrivers.CreateRawDisk(path, d.DiskSize); err != nil {
+				return err
+			}
+		}
+	}
+
 	log.Info("Starting QEMU VM...")
 	return d.Start()
 }
@@ -452,6 +469,15 @@ func (d *Driver) Start() error { //nolint to suppress cyclomatic complexity 31 i
 			"virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=config-2")
 	}
 
+	for i := 0; i < d.ExtraDisks; i++ {
+		// use a higher index for extra disks to reduce ID collision with current or future
+		// low-indexed devices (e.g., firmware, ISO CDROM, cloud config, and network device)
+		index := i + 10
+		startCmd = append(startCmd,
+			"-drive", fmt.Sprintf("file=%s,index=%d,media=disk,format=raw,if=virtio", pkgdrivers.ExtraDiskPath(d.BaseDriver, i), index),
+		)
+	}
+
 	if d.VirtioDrives {
 		startCmd = append(startCmd,
 			"-drive", fmt.Sprintf("file=%s,index=0,media=disk,if=virtio", d.diskPath()))
@@ -520,15 +546,31 @@ func (d *Driver) Start() error { //nolint to suppress cyclomatic complexity 31 i
 			time.Sleep(2 * time.Second)
 		}
 
-		if err != nil {
+		if err == nil {
+			log.Debugf("IP: %s", d.IPAddress)
+			break
+		}
+		if !isBootpdError(err) {
 			return errors.Wrap(err, "IP address never found in dhcp leases file")
 		}
-		log.Debugf("IP: %s", d.IPAddress)
+		if unblockErr := firewall.UnblockBootpd(); unblockErr != nil {
+			klog.Errorf("failed unblocking bootpd from firewall: %v", unblockErr)
+			exit.Error(reason.IfBootpdFirewall, "ip not found", err)
+		}
+		out.Styled(style.Restarting, "Successfully unblocked bootpd process from firewall, retrying")
+		return fmt.Errorf("ip not found: %v", err)
 	}
 
 	log.Infof("Waiting for VM to start (ssh -p %d docker@%s)...", d.SSHPort, d.IPAddress)
 
 	return WaitForTCPWithDelay(fmt.Sprintf("%s:%d", d.IPAddress, d.SSHPort), time.Second)
+}
+
+func isBootpdError(err error) bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return strings.Contains(err.Error(), "could not find an IP address")
 }
 
 func cmdOutErr(cmdStr string, args ...string) (string, string, error) {

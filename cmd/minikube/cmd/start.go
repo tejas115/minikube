@@ -47,6 +47,7 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"k8s.io/minikube/pkg/minikube/command"
+	"k8s.io/minikube/pkg/minikube/firewall"
 	netutil "k8s.io/minikube/pkg/network"
 
 	"k8s.io/klog/v2"
@@ -89,11 +90,13 @@ type versionJSON struct {
 }
 
 var (
-	registryMirror   []string
-	insecureRegistry []string
-	apiServerNames   []string
-	apiServerIPs     []net.IP
-	hostRe           = regexp.MustCompile(`^[^-][\w\.-]+$`)
+	// ErrKubernetesPatchNotFound is when a patch was not found for the given <major>.<minor> version
+	ErrKubernetesPatchNotFound = errors.New("Unable to detect the latest patch release for specified Kubernetes version")
+	registryMirror             []string
+	insecureRegistry           []string
+	apiServerNames             []string
+	apiServerIPs               []net.IP
+	hostRe                     = regexp.MustCompile(`^[^-][\w\.-]+$`)
 )
 
 func init() {
@@ -300,11 +303,23 @@ func provisionWithDriver(cmd *cobra.Command, ds registry.DriverState, existing *
 	}
 
 	virtualBoxMacOS13PlusWarning(driverName)
-	vmwareUnsupported(driverName)
 	validateFlags(cmd, driverName)
 	validateUser(driverName)
 	if driverName == oci.Docker {
 		validateDockerStorageDriver(driverName)
+	}
+
+	k8sVersion, err := getKubernetesVersion(existing)
+	if err != nil {
+		klog.Warningf("failed getting Kubernetes version: %v", err)
+	}
+
+	// Disallow accepting addons flag without Kubernetes
+	// It places here because cluster config is required to get the old version.
+	if cmd.Flags().Changed(config.AddonListFlag) {
+		if k8sVersion == constants.NoKubernetesVersion || viper.GetBool(noKubernetes) {
+			exit.Message(reason.Usage, "You cannot enable addons on a cluster without Kubernetes, to enable Kubernetes on your cluster, run: minikube start --kubernetes-version=stable")
+		}
 	}
 
 	// Download & update the driver, even in --download-only mode
@@ -318,11 +333,16 @@ func provisionWithDriver(cmd *cobra.Command, ds registry.DriverState, existing *
 		stopk8s = true
 	}
 
-	k8sVersion := getKubernetesVersion(existing)
 	rtime := getContainerRuntime(existing)
 	cc, n, err := generateClusterConfig(cmd, existing, k8sVersion, rtime, driverName)
 	if err != nil {
 		return node.Starter{}, errors.Wrap(err, "Failed to generate config")
+	}
+
+	if firewall.IsBootpdBlocked(cc) {
+		if err := firewall.UnblockBootpd(); err != nil {
+			klog.Warningf("failed unblocking bootpd from firewall: %v", err)
+		}
 	}
 
 	if driver.IsVM(cc.Driver) && runtime.GOARCH == "arm64" && cc.KubernetesConfig.ContainerRuntime == "crio" {
@@ -390,16 +410,6 @@ func virtualBoxMacOS13PlusWarning(driverName string) {
 `, out.V{"driver": suggestedDriver})
 }
 
-func vmwareUnsupported(driverName string) {
-	if !driver.IsVMware(driverName) {
-		return
-	}
-	exit.Message(reason.DrvUnsupported, `Due to security improvements to minikube the VMware driver is currently not supported. Available workarounds are to use a different driver or downgrade minikube to v1.29.0.
-
-    We are accepting community contributions to fix this, for more details on the issue see: https://github.com/kubernetes/minikube/issues/16221
-`)
-}
-
 func validateBuiltImageVersion(r command.Runner, driverName string) {
 	if driver.IsNone(driverName) {
 		return
@@ -416,9 +426,30 @@ func validateBuiltImageVersion(r command.Runner, driverName string) {
 		return
 	}
 
-	if versionDetails.MinikubeVersion != version.GetVersion() {
+	if !imageMatchesBinaryVersion(versionDetails.MinikubeVersion, version.GetVersion()) {
 		out.WarningT("Image was not built for the current minikube version. To resolve this you can delete and recreate your minikube cluster using the latest images. Expected minikube version: {{.imageMinikubeVersion}} -> Actual minikube version: {{.minikubeVersion}}", out.V{"imageMinikubeVersion": versionDetails.MinikubeVersion, "minikubeVersion": version.GetVersion()})
 	}
+}
+
+func imageMatchesBinaryVersion(imageVersion, binaryVersion string) bool {
+	if binaryVersion == imageVersion {
+		return true
+	}
+
+	// the map below is used to map the binary version to the version the image expects
+	// this is usually done when a patch version is released but a new ISO/Kicbase is not needed
+	// that way a version mismatch warning won't be thrown
+	//
+	// ex.
+	// the v1.31.0 and v1.31.1 minikube binaries both use v1.31.0 ISO & Kicbase
+	// to prevent the v1.31.1 binary from throwing a version mismatch warning we use the map to change the binary version used in the comparison
+
+	mappedVersions := map[string]string{
+		"v1.31.1": "v1.31.0",
+	}
+	binaryVersion, ok := mappedVersions[binaryVersion]
+
+	return ok && binaryVersion == imageVersion
 }
 
 func startWithDriver(cmd *cobra.Command, starter node.Starter, existing *config.ClusterConfig) (*kubeconfig.Settings, error) {
@@ -1581,21 +1612,27 @@ func validateInsecureRegistry() {
 	}
 }
 
-func createNode(cc config.ClusterConfig, kubeNodeName string, existing *config.ClusterConfig) (config.ClusterConfig, config.Node, error) {
+func createNode(cc config.ClusterConfig, existing *config.ClusterConfig) (config.ClusterConfig, config.Node, error) {
 	// Create the initial node, which will necessarily be a control plane
 	if existing != nil {
 		cp, err := config.PrimaryControlPlane(existing)
-		cp.KubernetesVersion = getKubernetesVersion(&cc)
-		cp.ContainerRuntime = getContainerRuntime(&cc)
 		if err != nil {
 			return cc, config.Node{}, err
 		}
+		cp.KubernetesVersion, err = getKubernetesVersion(&cc)
+		if err != nil {
+			klog.Warningf("failed getting Kubernetes version: %v", err)
+		}
+		cp.ContainerRuntime = getContainerRuntime(&cc)
 
 		// Make sure that existing nodes honor if KubernetesVersion gets specified on restart
 		// KubernetesVersion is the only attribute that the user can override in the Node object
 		nodes := []config.Node{}
 		for _, n := range existing.Nodes {
-			n.KubernetesVersion = getKubernetesVersion(&cc)
+			n.KubernetesVersion, err = getKubernetesVersion(&cc)
+			if err != nil {
+				klog.Warningf("failed getting Kubernetes version: %v", err)
+			}
 			n.ContainerRuntime = getContainerRuntime(&cc)
 			nodes = append(nodes, n)
 		}
@@ -1604,11 +1641,14 @@ func createNode(cc config.ClusterConfig, kubeNodeName string, existing *config.C
 		return cc, cp, nil
 	}
 
+	kubeVer, err := getKubernetesVersion(&cc)
+	if err != nil {
+		klog.Warningf("failed getting Kubernetes version: %v", err)
+	}
 	cp := config.Node{
 		Port:              cc.KubernetesConfig.NodePort,
-		KubernetesVersion: getKubernetesVersion(&cc),
+		KubernetesVersion: kubeVer,
 		ContainerRuntime:  getContainerRuntime(&cc),
-		Name:              kubeNodeName,
 		ControlPlane:      true,
 		Worker:            true,
 	}
@@ -1654,12 +1694,27 @@ func autoSetDriverOptions(cmd *cobra.Command, drvName string) (err error) {
 
 // validateKubernetesVersion ensures that the requested version is reasonable
 func validateKubernetesVersion(old *config.ClusterConfig) {
-	nvs, _ := semver.Make(strings.TrimPrefix(getKubernetesVersion(old), version.VersionPrefix))
+	paramVersion := viper.GetString(kubernetesVersion)
+	paramVersion = strings.TrimPrefix(strings.ToLower(paramVersion), version.VersionPrefix)
+	kubernetesVer, err := getKubernetesVersion(old)
+	if err != nil {
+		if errors.Is(err, ErrKubernetesPatchNotFound) {
+			exit.Message(reason.PatchNotFound, "Unable to detect the latest patch release for specified major.minor version v{{.majorminor}}",
+				out.V{"majorminor": paramVersion})
+		}
+		exit.Message(reason.Usage, `Unable to parse "{{.kubernetes_version}}": {{.error}}`, out.V{"kubernetes_version": paramVersion, "error": err})
+
+	}
+
+	nvs, _ := semver.Make(strings.TrimPrefix(kubernetesVer, version.VersionPrefix))
 	oldestVersion := semver.MustParse(strings.TrimPrefix(constants.OldestKubernetesVersion, version.VersionPrefix))
 	defaultVersion := semver.MustParse(strings.TrimPrefix(constants.DefaultKubernetesVersion, version.VersionPrefix))
 	newestVersion := semver.MustParse(strings.TrimPrefix(constants.NewestKubernetesVersion, version.VersionPrefix))
 	zeroVersion := semver.MustParse(strings.TrimPrefix(constants.NoKubernetesVersion, version.VersionPrefix))
 
+	if isTwoDigitSemver(paramVersion) && getLatestPatch(paramVersion) != "" {
+		out.Styled(style.Workaround, `Using Kubernetes {{.version}} since patch version was unspecified`, out.V{"version": nvs})
+	}
 	if nvs.Equals(zeroVersion) {
 		klog.Infof("No Kubernetes version set for minikube, setting Kubernetes version to %s", constants.NoKubernetesVersion)
 		return
@@ -1730,7 +1785,7 @@ func isBaseImageApplicable(drv string) bool {
 	return registry.IsKIC(drv)
 }
 
-func getKubernetesVersion(old *config.ClusterConfig) string {
+func getKubernetesVersion(old *config.ClusterConfig) (string, error) {
 	if viper.GetBool(noKubernetes) {
 		// Exit if --kubernetes-version is specified.
 		if viper.GetString(kubernetesVersion) != "" {
@@ -1759,12 +1814,20 @@ $ minikube config unset kubernetes-version`)
 		paramVersion = constants.NewestKubernetesVersion
 	}
 
-	nvs, err := semver.Make(strings.TrimPrefix(paramVersion, version.VersionPrefix))
+	kubernetesSemver := strings.TrimPrefix(strings.ToLower(paramVersion), version.VersionPrefix)
+	if isTwoDigitSemver(kubernetesSemver) {
+		potentialPatch := getLatestPatch(kubernetesSemver)
+		if potentialPatch == "" {
+			return "", ErrKubernetesPatchNotFound
+		}
+		kubernetesSemver = potentialPatch
+	}
+	nvs, err := semver.Make(kubernetesSemver)
 	if err != nil {
 		exit.Message(reason.Usage, `Unable to parse "{{.kubernetes_version}}": {{.error}}`, out.V{"kubernetes_version": paramVersion, "error": err})
 	}
 
-	return version.VersionPrefix + nvs.String()
+	return version.VersionPrefix + nvs.String(), nil
 }
 
 // validateDockerStorageDriver checks that docker is using overlay2
@@ -1785,7 +1848,7 @@ func validateDockerStorageDriver(drvName string) {
 	if si.StorageDriver == "overlay2" {
 		return
 	}
-	out.WarningT("{{.Driver}} is currently using the {{.StorageDriver}} storage driver, consider switching to overlay2 for better performance", out.V{"StorageDriver": si.StorageDriver, "Driver": drvName})
+	out.WarningT("{{.Driver}} is currently using the {{.StorageDriver}} storage driver, setting preload=false", out.V{"StorageDriver": si.StorageDriver, "Driver": drvName})
 	viper.Set(preload, false)
 }
 
@@ -1849,7 +1912,11 @@ func validateBareMetal(drvName string) {
 	}
 
 	// conntrack is required starting with Kubernetes 1.18, include the release candidates for completion
-	version, _ := util.ParseKubernetesVersion(getKubernetesVersion(nil))
+	kubeVer, err := getKubernetesVersion(nil)
+	if err != nil {
+		klog.Warningf("failed getting Kubernetes version: %v", err)
+	}
+	version, _ := util.ParseKubernetesVersion(kubeVer)
 	if version.GTE(semver.MustParse("1.18.0-beta.1")) {
 		if _, err := exec.LookPath("conntrack"); err != nil {
 			exit.Message(reason.GuestMissingConntrack, "Sorry, Kubernetes {{.k8sVersion}} requires conntrack to be installed in root's path", out.V{"k8sVersion": version.String()})
@@ -1878,4 +1945,52 @@ func exitGuestProvision(err error) {
 		exit.Message(reason.GuestProvisionContainerExited, "Docker container exited prematurely after it was created, consider investigating Docker's performance/health.")
 	}
 	exit.Error(reason.GuestProvision, "error provisioning guest", err)
+}
+
+// Example input = 1.26 => output = "1.26.5"
+// Example input = 1.26.5 => output = "1.26.5"
+// Example input = 1.26.999 => output = ""
+func getLatestPatch(majorMinorVer string) string {
+	for _, k := range constants.ValidKubernetesVersions {
+		if strings.HasPrefix(k, fmt.Sprintf("v%s.", majorMinorVer)) {
+			return strings.TrimPrefix(k, version.VersionPrefix)
+		}
+
+	}
+	return ""
+}
+
+func isTwoDigitSemver(ver string) bool {
+	majorMinorOnly := regexp.MustCompile(`^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)$`)
+	return majorMinorOnly.MatchString(ver)
+}
+
+func startNerdctld() {
+	// for containerd runtime using ssh, we have installed nerdctld and nerdctl into kicbase
+	// These things will be included in the ISO/Base image in the future versions
+
+	// copy these binaries to the path of the containerd node
+	co := mustload.Running(ClusterFlagValue())
+	runner := co.CP.Runner
+
+	// and set 777 to these files
+	if out, err := runner.RunCmd(exec.Command("sudo", "chmod", "777", "/usr/local/bin/nerdctl", "/usr/local/bin/nerdctld")); err != nil {
+		exit.Error(reason.StartNerdctld, fmt.Sprintf("Failed setting permission for nerdctl: %s", out.Output()), err)
+	}
+
+	// sudo systemctl start nerdctld.socket
+	if out, err := runner.RunCmd(exec.Command("sudo", "systemctl", "start", "nerdctld.socket")); err != nil {
+		exit.Error(reason.StartNerdctld, fmt.Sprintf("Failed to enable nerdctld.socket: %s", out.Output()), err)
+	}
+	// sudo systemctl start nerdctld.service
+	if out, err := runner.RunCmd(exec.Command("sudo", "systemctl", "start", "nerdctld.service")); err != nil {
+		exit.Error(reason.StartNerdctld, fmt.Sprintf("Failed to enable nerdctld.service: %s", out.Output()), err)
+	}
+
+	// set up environment variable on remote machine. docker client uses 'non-login & non-interactive shell' therefore the only way is to modify .bashrc file of user 'docker'
+	// insert this at 4th line
+	envSetupCommand := exec.Command("/bin/bash", "-c", "sed -i '4i export DOCKER_HOST=unix:///run/nerdctld.sock' .bashrc")
+	if out, err := runner.RunCmd(envSetupCommand); err != nil {
+		exit.Error(reason.StartNerdctld, fmt.Sprintf("Failed to set up DOCKER_HOST: %s", out.Output()), err)
+	}
 }

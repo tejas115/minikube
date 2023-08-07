@@ -47,6 +47,9 @@ tests the GCP Auth addon with either phony or real credentials and makes sure th
 
 #### validateHeadlampAddon
 
+#### validateInspektorGadgetAddon
+tests the inspektor-gadget addon by ensuring the pod has come up and addon disables
+
 #### validateCloudSpannerAddon
 tests the cloud-spanner addon by ensuring the deployment and pod come up and addon disables
 
@@ -75,6 +78,9 @@ makes sure the --force-systemd flag worked with the cri-o container runtime
 
 ## TestForceSystemdEnv
 makes sure the MINIKUBE_FORCE_SYSTEMD environment variable works just as well as the --force-systemd flag
+
+## TestDockerEnvContainerd
+makes sure that minikube docker-env command works when the runtime is containerd
 
 ## TestKVMDriverInstallOrUpdate
 makes sure our docker-machine-driver-kvm2 binary can be installed properly
@@ -397,8 +403,15 @@ Steps:
 asserts that the `minikube license` command downloads and untars the licenses
 Note: This test will fail on release PRs as the licenses file for the new version won't be uploaded at that point
 
+#### validateInvalidService
+makes sure minikube will not start a tunnel for an unavailable service that has no running pods
+
 #### validateMountCmd
 verifies the minikube mount command works properly
+for the platforms that support it, we're testing:
+- a generic 9p mount
+- a 9p mount on a specific port
+- cleaning-mechanism for profile-specific mounts
 
 #### validatePersistentVolumeClaim
 makes sure PVCs work properly
@@ -441,6 +454,9 @@ tests the functionality of the gVisor addon
 
 ## TestImageBuild
 makes sure the 'minikube image build' command works fine
+
+#### validateSetupImageBuild
+starts a cluster for the image builds
 
 #### validateNormalImageBuild
 is normal test case for minikube image build, with -t parameter
@@ -611,7 +627,7 @@ validates that profile list works with --no-kubernetes
 validates that minikube start with no args works.
 
 ## TestChangeNoneUser
-tests to make sure the CHANGE_MINIKUBE_NONE_USER environemt variable is respected
+tests to make sure the CHANGE_MINIKUBE_NONE_USER environment variable is respected
 and changes the minikube file permissions from root to the correct user.
 
 ## TestPause

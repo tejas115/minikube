@@ -196,7 +196,7 @@ func initMinikubeFlags() {
 	startCmd.Flags().StringP(network, "", "", "network to run minikube with. Now it is used by docker/podman and KVM drivers. If left empty, minikube will create a new network.")
 	startCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Format to print stdout in. Options include: [text,json]")
 	startCmd.Flags().StringP(trace, "", "", "Send trace events. Options include: [gcp]")
-	startCmd.Flags().Int(extraDisks, 0, "Number of extra disks created and attached to the minikube VM (currently only implemented for hyperkit and kvm2 drivers)")
+	startCmd.Flags().Int(extraDisks, 0, "Number of extra disks created and attached to the minikube VM (currently only implemented for hyperkit, kvm2, and qemu2 drivers)")
 	startCmd.Flags().Duration(certExpiration, constants.DefaultCertExpiration, "Duration until minikube certificate expiration, defaults to three years (26280h).")
 	startCmd.Flags().String(binaryMirror, "", "Location to fetch kubectl, kubelet, & kubeadm binaries from.")
 	startCmd.Flags().Bool(disableOptimizations, false, "If set, disables optimizations that are set for local Kubernetes. Including decreasing CoreDNS replicas from 2 to 1. Defaults to false.")
@@ -329,11 +329,7 @@ func generateClusterConfig(cmd *cobra.Command, existing *config.ClusterConfig, k
 		proxy.SetDockerEnv()
 	}
 
-	var kubeNodeName string
-	if driver.BareMetal(cc.Driver) {
-		kubeNodeName = "m01"
-	}
-	return createNode(cc, kubeNodeName, existing)
+	return createNode(cc, existing)
 }
 
 func getCPUCount(drvName string) int {
@@ -820,7 +816,11 @@ func updateExistingConfigFromFlags(cmd *cobra.Command, existing *config.ClusterC
 	updateStringFromFlag(cmd, &cc.SocketVMnetPath, socketVMnetPath)
 
 	if cmd.Flags().Changed(kubernetesVersion) {
-		cc.KubernetesConfig.KubernetesVersion = getKubernetesVersion(existing)
+		kubeVer, err := getKubernetesVersion(existing)
+		if err != nil {
+			klog.Warningf("failed getting Kubernetes version: %v", err)
+		}
+		cc.KubernetesConfig.KubernetesVersion = kubeVer
 	}
 	if cmd.Flags().Changed(containerRuntime) {
 		cc.KubernetesConfig.ContainerRuntime = getContainerRuntime(existing)
@@ -945,7 +945,7 @@ func interpretWaitFlag(cmd cobra.Command) map[string]bool {
 }
 
 func checkExtraDiskOptions(cmd *cobra.Command, driverName string) {
-	supportedDrivers := []string{driver.HyperKit, driver.KVM2}
+	supportedDrivers := []string{driver.HyperKit, driver.KVM2, driver.QEMU2}
 
 	if cmd.Flags().Changed(extraDisks) {
 		supported := false

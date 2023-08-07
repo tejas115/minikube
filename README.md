@@ -32,7 +32,7 @@ minikube runs the latest stable release of Kubernetes, with support for standard
 As well as developer-friendly features:
 
 * [Addons](https://minikube.sigs.k8s.io/docs/handbook/deploying/#addons) - a marketplace for developers to share configurations for running services on minikube
-* [NVIDIA GPU support](https://minikube.sigs.k8s.io/docs/tutorials/nvidia_gpu/) - for machine learning
+* [NVIDIA GPU support](https://minikube.sigs.k8s.io/docs/handbook/addons/nvidia/) - for machine learning
 * [Filesystem mounts](https://minikube.sigs.k8s.io/docs/handbook/mount/)
 
 **For more information, see the official [minikube website](https://minikube.sigs.k8s.io)**
@@ -55,7 +55,7 @@ See minikube in action [here](https://minikube.sigs.k8s.io/docs/handbook/control
 
 minikube is a Kubernetes [#sig-cluster-lifecycle](https://github.com/kubernetes/community/tree/master/sig-cluster-lifecycle)  project.
 
-* [**#minikube on Kubernetes Slack**](https://kubernetes.slack.com) - Live chat with minikube developers!
+* [**#minikube on Kubernetes Slack**](https://kubernetes.slack.com/messages/minikube) - Live chat with minikube developers!
 * [minikube-users mailing list](https://groups.google.com/g/minikube-users)
 * [minikube-dev mailing list](https://groups.google.com/g/minikube-dev)
 

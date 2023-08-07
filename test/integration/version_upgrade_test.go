@@ -69,6 +69,10 @@ func legacyVersion() string {
 			version = "v1.9.0"
 		}
 	}
+	if NoneDriver() {
+		// oldest version where none driver doesn't have to be run as root
+		version = "v1.16.0"
+	}
 	// the version containerd in ISO was upgraded to 1.4.2
 	// we need it to use runc.v2 plugin
 	// note: Test*BinaryUpgrade require minikube v1.22+ to satisfy newer containerd config structure
@@ -303,7 +307,7 @@ func TestMissingContainerUpgrade(t *testing.T) {
 
 	defer CleanupWithLogs(t, profile, cancel)
 
-	legacyVersion := "v1.9.1"
+	legacyVersion := legacyVersion()
 
 	tf, err := installRelease(legacyVersion)
 	if err != nil {
