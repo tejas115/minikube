@@ -297,7 +297,7 @@ var Addons = map[string]*Addon{
 		MustBinAsset(addons.InspektorGadgetAssets, "inspektor-gadget/ig-daemonset.yaml.tmpl", vmpath.GuestAddonsDir, "ig-daemonset.yaml", "0640"),
 	}, false, "inspektor-gadget", "3rd party (inspektor-gadget.io)", "https://github.com/orgs/inspektor-gadget/people", "https://minikube.sigs.k8s.io/docs/handbook/addons/inspektor-gadget/",
 		map[string]string{
-			"InspektorGadget": "inspektor-gadget/inspektor-gadget:v0.18.1@sha256:32f20b28cb05502dd6bcd2364321c834b97317039b456cff6f074b09824a7ac5",
+			"InspektorGadget": "inspektor-gadget/inspektor-gadget:v0.20.0@sha256:01b7311f9512411ef6530e09dbdd3aeaea0abc4101227dbead4d44c36b255ca7",
 		}, map[string]string{
 			"InspektorGadget": "ghcr.io",
 		}),
@@ -745,7 +745,7 @@ var Addons = map[string]*Addon{
 		MustBinAsset(addons.HeadlampAssets, "headlamp/headlamp-clusterrolebinding.yaml", vmpath.GuestAddonsDir, "headlamp-clusterrolebinding.yaml", "0640"),
 	}, false, "headlamp", "3rd party (kinvolk.io)", "yolossn", "https://minikube.sigs.k8s.io/docs/handbook/addons/headlamp/",
 		map[string]string{
-			"Headlamp": "headlamp-k8s/headlamp:v0.18.0@sha256:67ba87b88218563eec9684525904936609713b02dcbcf4390cd055766217ed45",
+			"Headlamp": "headlamp-k8s/headlamp:v0.19.0@sha256:498ea22dc5acadaa4015e7a50335d21fdce45d9e8f1f8adf29c2777da4182f98",
 		},
 		map[string]string{
 			"Headlamp": "ghcr.io",
@@ -753,7 +753,7 @@ var Addons = map[string]*Addon{
 	"cloud-spanner": NewAddon([]*BinAsset{
 		MustBinAsset(addons.CloudSpanner, "cloud-spanner/deployment.yaml", vmpath.GuestAddonsDir, "deployment.yaml", "0640"),
 	}, false, "cloud-spanner", "Google", "", "https://minikube.sigs.k8s.io/docs/handbook/addons/cloud-spanner/", map[string]string{
-		"CloudSpanner": "cloud-spanner-emulator/emulator:1.5.8@sha256:b0353f77bc1f47c74f86e60c61b64111be5724f9c459a862ec73772c85641bbb",
+		"CloudSpanner": "cloud-spanner-emulator/emulator:1.5.9@sha256:ab53ffefbcb53cea3b893e07c6796ba5df3bc67d1561eeb8efecaec466134f2f",
 	}, map[string]string{
 		"CloudSpanner": "gcr.io",
 	}),
@@ -935,6 +935,7 @@ func GenerateTemplateData(addon *Addon, cc *config.ClusterConfig, netInfo Networ
 	// Network info for generating template
 	opts.NetworkInfo["ControlPlaneNodeIP"] = netInfo.ControlPlaneNodeIP
 	opts.NetworkInfo["ControlPlaneNodePort"] = fmt.Sprint(netInfo.ControlPlaneNodePort)
+	opts.NetworkInfo["DNSDomain"] = cfg.DNSDomain
 
 	// Append postfix "/" to registries
 	for k, v := range opts.Registries {
