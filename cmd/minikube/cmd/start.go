@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/blang/semver/v4"
@@ -1149,6 +1150,11 @@ func validateRequestedMemorySize(req int, drvName string) {
 		exitIfNotForced(reason.RsrcInsufficientSysMemory, "System only has {{.size}}MiB available, less than the required {{.req}}MiB for Kubernetes", out.V{"size": sysLimit, "req": minUsableMem})
 	}
 
+	// if --memory=no-limit, ignore remaining checks
+	if req == 0 && driver.IsKIC(drvName) {
+		return
+	}
+
 	if req < minUsableMem {
 		exitIfNotForced(reason.RsrcInsufficientReqMemory, "Requested memory allocation {{.requested}}MiB is less than the usable minimum of {{.minimum_memory}}MB", out.V{"requested": req, "minimum_memory": minUsableMem})
 	}
@@ -1178,6 +1184,10 @@ func validateRequestedMemorySize(req int, drvName string) {
 			`The requested memory allocation of {{.requested}}MiB does not leave room for system overhead (total system memory: {{.system_limit}}MiB). You may face stability issues.`,
 			out.V{"requested": req, "system_limit": sysLimit, "advised": advised})
 	}
+
+	if driver.IsHyperV(drvName) && req%2 == 1 {
+		exitIfNotForced(reason.RsrcInvalidHyperVMemory, "Hyper-V requires that memory MB be an even number, {{.memory}}MB was specified, try passing `--memory {{.suggestMemory}}`", out.V{"memory": req, "suggestMemory": req - 1})
+	}
 }
 
 // validateCPUCount validates the cpu count matches the minimum recommended & not exceeding the available cpu count
@@ -1204,6 +1214,21 @@ func validateCPUCount(drvName string) {
 		availableCPUs = ci
 	}
 
+	if availableCPUs < 2 {
+		if drvName == oci.Docker && runtime.GOOS == "darwin" {
+			exitIfNotForced(reason.RsrcInsufficientDarwinDockerCores, "Docker Desktop has less than 2 CPUs configured, but Kubernetes requires at least 2 to be available")
+		} else if drvName == oci.Docker && runtime.GOOS == "windows" {
+			exitIfNotForced(reason.RsrcInsufficientWindowsDockerCores, "Docker Desktop has less than 2 CPUs configured, but Kubernetes requires at least 2 to be available")
+		} else {
+			exitIfNotForced(reason.RsrcInsufficientCores, "{{.driver_name}} has less than 2 CPUs available, but Kubernetes requires at least 2 to be available", out.V{"driver_name": driver.FullName(viper.GetString("driver"))})
+		}
+	}
+
+	// if --cpus=no-limit, ignore remaining checks
+	if cpuCount == 0 && driver.IsKIC(drvName) {
+		return
+	}
+
 	if cpuCount < minimumCPUS {
 		exitIfNotForced(reason.RsrcInsufficientCores, "Requested cpu count {{.requested_cpus}} is less than the minimum allowed of {{.minimum_cpus}}", out.V{"requested_cpus": cpuCount, "minimum_cpus": minimumCPUS})
 	}
@@ -1222,23 +1247,10 @@ func validateCPUCount(drvName string) {
 
 		exitIfNotForced(reason.RsrcInsufficientCores, "Requested cpu count {{.requested_cpus}} is greater than the available cpus of {{.avail_cpus}}", out.V{"requested_cpus": cpuCount, "avail_cpus": availableCPUs})
 	}
-
-	// looks good
-	if availableCPUs >= 2 {
-		return
-	}
-
-	if drvName == oci.Docker && runtime.GOOS == "darwin" {
-		exitIfNotForced(reason.RsrcInsufficientDarwinDockerCores, "Docker Desktop has less than 2 CPUs configured, but Kubernetes requires at least 2 to be available")
-	} else if drvName == oci.Docker && runtime.GOOS == "windows" {
-		exitIfNotForced(reason.RsrcInsufficientWindowsDockerCores, "Docker Desktop has less than 2 CPUs configured, but Kubernetes requires at least 2 to be available")
-	} else {
-		exitIfNotForced(reason.RsrcInsufficientCores, "{{.driver_name}} has less than 2 CPUs available, but Kubernetes requires at least 2 to be available", out.V{"driver_name": driver.FullName(viper.GetString("driver"))})
-	}
 }
 
 // validateFlags validates the supplied flags against known bad combinations
-func validateFlags(cmd *cobra.Command, drvName string) {
+func validateFlags(cmd *cobra.Command, drvName string) { //nolint:gocyclo
 	if cmd.Flags().Changed(humanReadableDiskSize) {
 		err := validateDiskSize(viper.GetString(humanReadableDiskSize))
 		if err != nil {
@@ -1294,6 +1306,18 @@ func validateFlags(cmd *cobra.Command, drvName string) {
 
 	if cmd.Flags().Changed(staticIP) {
 		if err := validateStaticIP(viper.GetString(staticIP), drvName, viper.GetString(subnet)); err != nil {
+			exit.Message(reason.Usage, "{{.err}}", out.V{"err": err})
+		}
+	}
+
+	if cmd.Flags().Changed(gpus) {
+		if err := validateGPUs(viper.GetString(gpus), drvName, viper.GetString(containerRuntime)); err != nil {
+			exit.Message(reason.Usage, "{{.err}}", out.V{"err": err})
+		}
+	}
+
+	if cmd.Flags().Changed(autoPauseInterval) {
+		if err := validateAutoPauseInterval(viper.GetDuration(autoPauseInterval)); err != nil {
 			exit.Message(reason.Usage, "{{.err}}", out.V{"err": err})
 		}
 	}
@@ -1434,6 +1458,38 @@ func validateRuntime(rtime string) error {
 	return nil
 }
 
+// validateGPUs validates that a valid option was given, and if so, can it be used with the given configuration
+func validateGPUs(value, drvName, rtime string) error {
+	if value == "" {
+		return nil
+	}
+	if err := validateGPUsArch(); err != nil {
+		return err
+	}
+	if value != "nvidia" && value != "all" {
+		return errors.Errorf(`The gpus flag must be passed a value of "nvidia" or "all"`)
+	}
+	if drvName == constants.Docker && (rtime == constants.Docker || rtime == constants.DefaultContainerRuntime) {
+		return nil
+	}
+	return errors.Errorf("The gpus flag can only be used with the docker driver and docker container-runtime")
+}
+
+func validateGPUsArch() error {
+	switch runtime.GOARCH {
+	case "amd64", "arm64", "ppc64le":
+		return nil
+	}
+	return errors.Errorf("The GPUs flag is only supported on amd64, arm64 & ppc64le, currently using %s", runtime.GOARCH)
+}
+
+func validateAutoPauseInterval(interval time.Duration) error {
+	if interval != interval.Abs() || interval.String() == "0s" {
+		return errors.New("auto-pause-interval must be greater than 0s")
+	}
+	return nil
+}
+
 func getContainerRuntime(old *config.ClusterConfig) string {
 	paramRuntime := viper.GetString(containerRuntime)
 
@@ -1481,13 +1537,18 @@ func validateChangedMemoryFlags(drvName string) {
 	var req int
 	var err error
 	memString := viper.GetString(memory)
-	if memString == constants.MaxResources {
+	if memString == constants.NoLimit && driver.IsKIC(drvName) {
+		req = 0
+	} else if memString == constants.MaxResources {
 		sysLimit, containerLimit, err := memoryLimits(drvName)
 		if err != nil {
 			klog.Warningf("Unable to query memory limits: %+v", err)
 		}
 		req = noLimitMemory(sysLimit, containerLimit, drvName)
 	} else {
+		if memString == constants.NoLimit {
+			exit.Message(reason.Usage, "The '{{.name}}' driver does not support --memory=no-limit", out.V{"name": drvName})
+		}
 		req, err = util.CalculateSizeInMB(memString)
 		if err != nil {
 			exitIfNotForced(reason.Usage, "Unable to parse memory '{{.memory}}': {{.error}}", out.V{"memory": memString, "error": err})
@@ -1507,7 +1568,12 @@ func noLimitMemory(sysLimit, containerLimit int, drvName string) int {
 		// Because of this allow more system overhead to prevent out of memory issues
 		sysOverhead = 1536
 	}
-	return sysLimit - sysOverhead
+	mem := sysLimit - sysOverhead
+	// Hyper-V requires an even number of MB, so if odd remove one MB
+	if driver.IsHyperV(drvName) && mem%2 == 1 {
+		mem--
+	}
+	return mem
 }
 
 // This function validates if the --registry-mirror
