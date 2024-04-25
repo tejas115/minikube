@@ -24,7 +24,7 @@ KIC_VERSION ?= $(shell grep -E "Version =" pkg/drivers/kic/types.go | cut -d \" 
 HUGO_VERSION ?= $(shell grep -E "HUGO_VERSION = \"" netlify.toml | cut -d \" -f2)
 
 # Default to .0 for higher cache hit rates, as build increments typically don't require new ISO versions
-ISO_VERSION ?= v1.33.0-1713736271-18706
+ISO_VERSION ?= v1.33.0-1713979993-18737
 
 # Dashes are valid in semver, but not Linux packaging. Use ~ to delimit alpha/beta
 DEB_VERSION ?= $(subst -,~,$(RAW_VERSION))
@@ -303,6 +303,7 @@ minikube-iso-%: deploy/iso/minikube-iso/board/minikube/%/rootfs-overlay/usr/bin/
 		cp deploy/iso/minikube-iso/go.hash $(BUILD_DIR)/buildroot/package/go/go.hash; \
 		git --git-dir=$(BUILD_DIR)/buildroot/.git config user.email "dev@random.com"; \
 		git --git-dir=$(BUILD_DIR)/buildroot/.git config user.name "Random developer"; \
+		(cd $(BUILD_DIR)/buildroot git apply ../../deploy/iso/minikube-iso/0001-revert-default-dnssec.patch); \
 	fi;
 	$(MAKE) -C $(BUILD_DIR)/buildroot $(BUILDROOT_OPTIONS) O=$(BUILD_DIR)/buildroot/output-$* minikube_$*_defconfig
 	$(MAKE) -C $(BUILD_DIR)/buildroot $(BUILDROOT_OPTIONS) O=$(BUILD_DIR)/buildroot/output-$* host-python3
