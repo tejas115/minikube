@@ -61,7 +61,7 @@ func (r *persistentRegistry) IsAlreadyDefinedAndRunning(tunnel *ID) (*ID, error)
 	}
 
 	for _, t := range tunnels {
-		if t.Route.Equal(tunnel.Route) {
+		if tunnel.MachineName == t.MachineName && t.Route.Equal(tunnel.Route) {
 			isRunning, err := checkIfRunning(t.Pid)
 			if err != nil {
 				return nil, fmt.Errorf("error checking whether conflicting tunnel (%v) is running: %s", t, err)
@@ -87,7 +87,7 @@ func (r *persistentRegistry) Register(tunnel *ID) (rerr error) {
 
 	alreadyExists := false
 	for i, t := range tunnels {
-		if t.Route.Equal(tunnel.Route) {
+		if tunnel.MachineName == t.MachineName && t.Route.Equal(tunnel.Route) {
 			isRunning, err := checkIfRunning(t.Pid)
 			if err != nil {
 				return fmt.Errorf("error checking whether conflicting tunnel (%v) is running: %s", t, err)
